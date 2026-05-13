@@ -99,33 +99,38 @@ PAGE = r"""<!DOCTYPE html>
     <div id="recent-list"></div>
   </div>
 
-  <div id="ios-install" style="display:none;margin-top:20px">
-    <div style="background:#1f242e;border-radius:16px;padding:20px">
-      <div style="font-weight:600;font-size:15px;margin-bottom:4px">📲 iOS Shortcut Setup</div>
-      <div style="font-size:12px;color:#7d8590;margin-bottom:16px">Create once — appears in every Share Sheet</div>
+  <div style="margin-top:20px">
+    <button onclick="toggleIos()" style="width:100%;background:#1f242e;border:none;border-radius:12px;padding:14px 16px;color:#e0e0e0;font-size:14px;font-weight:500;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:background .15s" id="ios-toggle">
+      <span>📲 iOS Shortcut Setup</span>
+      <span id="ios-arrow" style="color:#4dc9f6;font-size:18px;line-height:1">›</span>
+    </button>
+    <div id="ios-body" style="display:none;background:#1f242e;border-radius:0 0 12px 12px;padding:16px 20px 20px;margin-top:2px">
 
-      <div style="font-size:13px;color:#b0b0b0;line-height:1.9">
+      <div style="font-size:12px;color:#7d8590;margin-bottom:14px">Create once — then share any photo via <b style="color:#b0b0b0">Share → Upload to Claude</b></div>
+
+      <div style="font-size:13px;color:#b0b0b0;line-height:2">
         <b style="color:#e0e0e0">1.</b> Open <b style="color:#e0e0e0">Shortcuts</b> app → tap <b style="color:#4dc9f6">+</b><br>
         <b style="color:#e0e0e0">2.</b> Add Action → search <b style="color:#4dc9f6">Get Contents of URL</b><br>
-        <b style="color:#e0e0e0">3.</b> Set URL → tap below to copy it:<br>
+        <b style="color:#e0e0e0">3.</b> Paste this URL (tap to copy):
       </div>
 
-      <div id="sc-url" style="background:#0a0e14;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;color:#4dc9f6;word-break:break-all;cursor:pointer" onclick="copyUrl()">https://claude-photo.studio-colorbox.com/upload-raw</div>
-      <div id="sc-copied" style="font-size:11px;color:#4caf50;display:none;margin-bottom:6px">✓ Copied!</div>
+      <div id="sc-url" onclick="copyUrl()" style="background:#0a0e14;border-radius:8px;padding:10px 12px;margin:8px 0 4px;font-size:12px;color:#4dc9f6;word-break:break-all;cursor:pointer;border:1px solid #2a3140">https://claude-photo.studio-colorbox.com/upload-raw</div>
+      <div id="sc-copied" style="font-size:11px;color:#4caf50;display:none;margin-bottom:8px">✓ Copied to clipboard!</div>
 
-      <div style="font-size:13px;color:#b0b0b0;line-height:1.9">
-        <b style="color:#e0e0e0">4.</b> Method → <b style="color:#4dc9f6">POST</b>, Request Body → <b style="color:#4dc9f6">File</b><br>
+      <div style="font-size:13px;color:#b0b0b0;line-height:2">
+        <b style="color:#e0e0e0">4.</b> Method → <b style="color:#4dc9f6">POST</b> &nbsp;·&nbsp; Request Body → <b style="color:#4dc9f6">File</b><br>
         <b style="color:#e0e0e0">5.</b> Tap File field → choose <b style="color:#4dc9f6">Shortcut Input</b><br>
-        <b style="color:#e0e0e0">6.</b> Add Action → <b style="color:#4dc9f6">Get Dictionary Value</b>, key = <b style="color:#4dc9f6">path</b><br>
+        <b style="color:#e0e0e0">6.</b> Add Action → <b style="color:#4dc9f6">Get Dictionary Value</b> &nbsp;·&nbsp; key = <b style="color:#4dc9f6">path</b><br>
         <b style="color:#e0e0e0">7.</b> Add Action → <b style="color:#4dc9f6">Copy to Clipboard</b><br>
         <b style="color:#e0e0e0">8.</b> Add Action → <b style="color:#4dc9f6">Show Notification</b><br>
         <b style="color:#e0e0e0">9.</b> Name it <b style="color:#4dc9f6">Upload to Claude</b><br>
         <b style="color:#e0e0e0">10.</b> Tap <b style="color:#4dc9f6">ⓘ</b> → enable <b style="color:#4dc9f6">Show in Share Sheet</b>
       </div>
 
-      <div style="margin-top:14px;padding-top:14px;border-top:1px solid #2a3140;font-size:12px;color:#7d8590">
-        <b style="color:#b0b0b0">Tip — Auto-upload on screenshot:</b><br>
-        Automation tab → + → Personal Automation → Screenshot → same actions above → disable "Ask Before Running"
+      <div style="margin-top:14px;padding:12px;border-radius:8px;background:#141821;font-size:12px;color:#7d8590;line-height:1.8">
+        <b style="color:#b0b0b0">⚡ Auto-upload every screenshot:</b><br>
+        Automation tab → <b style="color:#b0b0b0">+</b> → Personal Automation → <b style="color:#b0b0b0">Screenshot</b><br>
+        → same 5 actions above → disable <b style="color:#b0b0b0">"Ask Before Running"</b>
       </div>
     </div>
   </div>
@@ -248,11 +253,19 @@ copyBtn.addEventListener('click',async()=>{
 });
 
 function copyUrl(){
-  const url=document.getElementById('sc-url').textContent;
+  const url=document.getElementById('sc-url').textContent.trim();
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(url).catch(()=>copyToClipboardFallback(url))}else{copyToClipboardFallback(url)}
   const el=document.getElementById('sc-copied');el.style.display='block';setTimeout(()=>el.style.display='none',2000);
 }
-if(/iPhone|iPad|iPod/.test(navigator.userAgent))document.getElementById('ios-install').style.display='block';
+function toggleIos(){
+  const body=document.getElementById('ios-body'),arrow=document.getElementById('ios-arrow');
+  const open=body.style.display==='none';
+  body.style.display=open?'block':'none';
+  arrow.style.transform=open?'rotate(90deg)':'';
+  arrow.style.transition='transform .2s';
+}
+// Auto-expand on iOS
+if(/iPhone|iPad|iPod/.test(navigator.userAgent))toggleIos();
 
 async function loadRecent(){
   try{
