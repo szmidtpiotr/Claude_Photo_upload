@@ -56,8 +56,12 @@ PAGE = r"""<!DOCTYPE html>
   .progress-bar{height:100%;background:#4dc9f6;width:0%;transition:width .2s}
   .recent{margin-top:24px}
   .recent h3{margin:0 0 12px;font-size:14px;color:#7d8590;font-weight:500}
-  .recent-item{padding:8px 12px;background:#1f242e;border-radius:8px;margin-bottom:6px;font-size:12px;color:#b0b0b0;word-break:break-all;cursor:pointer}
+  .recent-item{display:flex;align-items:center;gap:10px;padding:8px;background:#1f242e;border-radius:8px;margin-bottom:6px;cursor:pointer}
   .recent-item:active{background:#2a3140}
+  .recent-item img{width:64px;height:48px;object-fit:cover;border-radius:6px;flex-shrink:0;background:#0a0e14}
+  .recent-item span{font-size:11px;color:#b0b0b0;word-break:break-all;overflow:hidden}
+  .result-thumb{display:none;max-width:100%;max-height:200px;border-radius:8px;margin-bottom:12px;width:100%;object-fit:contain}
+  .result-thumb.show{display:block}
 </style>
 </head>
 <body>
@@ -83,6 +87,7 @@ PAGE = r"""<!DOCTYPE html>
   <div class="progress" id="progress"><div class="progress-bar" id="bar"></div></div>
 
   <div class="result" id="result">
+    <img class="result-thumb" id="result-thumb" src="" alt="Preview">
     <div>Saved at (copied to clipboard!):</div>
     <code id="path"></code>
     <button class="copy-btn" id="copy">Copy Again</button>
@@ -96,8 +101,17 @@ PAGE = r"""<!DOCTYPE html>
 
 <script>
 function copyToClipboardFallback(text){const textarea=document.createElement('textarea');textarea.value=text;document.body.appendChild(textarea);textarea.select();document.execCommand('copy');document.body.removeChild(textarea)}
-const pasteBtn=document.getElementById('paste-btn'),input=document.getElementById('file-input'),result=document.getElementById('result'),pathEl=document.getElementById('path'),copyBtn=document.getElementById('copy'),progress=document.getElementById('progress'),bar=document.getElementById('bar'),preview=document.getElementById('preview'),previewImg=document.getElementById('preview-img'),sendBtn=document.getElementById('send-btn'),cancelBtn=document.getElementById('cancel-btn');
+function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+const pasteBtn=document.getElementById('paste-btn'),input=document.getElementById('file-input'),result=document.getElementById('result'),pathEl=document.getElementById('path'),resultThumb=document.getElementById('result-thumb'),copyBtn=document.getElementById('copy'),progress=document.getElementById('progress'),bar=document.getElementById('bar'),preview=document.getElementById('preview'),previewImg=document.getElementById('preview-img'),sendBtn=document.getElementById('send-btn'),cancelBtn=document.getElementById('cancel-btn');
 let pendingFile=null;
+function showResult(path){
+  const name=path.split('/').pop();
+  resultThumb.src='/files/'+encodeURIComponent(name);
+  resultThumb.classList.add('show');
+  pathEl.textContent=path;
+  result.classList.add('show');
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(path).catch(()=>{copyToClipboardFallback(path)})}else{copyToClipboardFallback(path)}
+}
 
 pasteBtn.addEventListener('click',async()=>{
   try{
@@ -160,10 +174,8 @@ sendBtn.addEventListener('click',async()=>{
     xhr.onload=()=>{
       bar.style.width='100%';
       const data=JSON.parse(xhr.responseText);
-      pathEl.textContent=data.path;
-      result.classList.add('show');
+      showResult(data.path);
       pendingFile=null;
-      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(data.path).catch(()=>{copyToClipboardFallback(data.path)})}else{copyToClipboardFallback(data.path)}
       setTimeout(()=>{progress.classList.remove('show');bar.style.width='0%'},500);
       loadRecent();
     };
@@ -182,9 +194,7 @@ input.addEventListener('change',async e=>{
       xhr.onload=()=>{
         bar.style.width='100%';
         const data=JSON.parse(xhr.responseText);
-        pathEl.textContent=data.path;
-        result.classList.add('show');
-        if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(data.path).catch(()=>{copyToClipboardFallback(data.path)})}else{copyToClipboardFallback(data.path)}
+        showResult(data.path);
         setTimeout(()=>{progress.classList.remove('show');bar.style.width='0%'},500);
         loadRecent();
       };
@@ -208,12 +218,19 @@ copyBtn.addEventListener('click',async()=>{
 async function loadRecent(){
   try{
     const r=await fetch('/recent');const d=await r.json();
-    if(d.files.length){
-      document.getElementById('recent-section').style.display='block';
-      document.getElementById('recent-list').innerHTML=d.files.map(f=>
-        `<div class="recent-item" onclick="navigator.clipboard.writeText('${f}')">${f}</div>`
-      ).join('');
-    }
+    if(!d.files.length)return;
+    document.getElementById('recent-section').style.display='block';
+    const list=document.getElementById('recent-list');
+    list.innerHTML=d.files.map(f=>{
+      const name=f.split('/').pop();
+      return `<div class="recent-item" data-path="${escHtml(f)}"><img src="/files/${encodeURIComponent(name)}" loading="lazy" onerror="this.style.display='none'"><span>${escHtml(name)}</span></div>`;
+    }).join('');
+    list.querySelectorAll('.recent-item').forEach(el=>{
+      el.addEventListener('click',()=>{
+        const p=el.dataset.path;
+        if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(p).catch(()=>copyToClipboardFallback(p))}else{copyToClipboardFallback(p)}
+      });
+    });
   }catch(e){}
 }
 loadRecent();

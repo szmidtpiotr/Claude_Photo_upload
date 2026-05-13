@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 System tray icon for the Claude screenshot upload service.
-Uses AppIndicator3 (Ubuntu/GNOME native) with GTK3 menu.
-Recent uploads show inline thumbnail previews inside the dropdown.
+- Polls /recent every 5s; rebuilds menu after pre-fetching thumbnails.
+- Recent uploads show inline thumbnail previews inside the dropdown.
 """
 
 import os
@@ -32,7 +32,6 @@ except (ImportError, ValueError) as e:
     print("Run: sudo apt install gir1.2-appindicator3-0.1 python3-gi gir1.2-gtk-3.0")
     sys.exit(1)
 
-# Optional: system notification on new upload
 try:
     gi.require_version("Notify", "0.7")
     from gi.repository import Notify
@@ -48,6 +47,8 @@ APP_ID     = "claude-photo-upload"
 recent_files: list[str] = []
 _first_poll = True
 indicator   = None
+_thumb_cache: dict[str, GdkPixbuf.Pixbuf] = {}   # name → pixbuf
+THUMB_W, THUMB_H = 120, 90
 
 
 # ── Clipboard ──────────────────────────────────────────────────────────────────
@@ -58,28 +59,40 @@ def copy_to_clipboard(text: str):
     cb.store()
 
 
-# ── Thumbnail loader ───────────────────────────────────────────────────────────
+# ── Thumbnail cache ────────────────────────────────────────────────────────────
 
-def _load_thumb_async(url: str, img_widget: Gtk.Image, size: tuple[int, int] = (120, 90)):
-    """Download image in background, set pixbuf on img_widget when ready."""
-    def _fetch():
-        try:
-            suffix = Path(url).suffix or ".png"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                urllib.request.urlretrieve(url, f.name)
-                local = f.name
-            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(local, size[0], size[1], True)
-            GLib.idle_add(img_widget.set_from_pixbuf, pixbuf)
-        except Exception:
-            pass
+def _fetch_thumb(name: str) -> bool:
+    """Download thumbnail into cache. Returns True if newly cached."""
+    if name in _thumb_cache:
+        return False
+    url = f"{API_BASE}/files/{name}"
+    try:
+        suffix = Path(name).suffix or ".png"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            urllib.request.urlretrieve(url, f.name)
+            local = f.name
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(local, THUMB_W, THUMB_H, True)
+        _thumb_cache[name] = pixbuf
+        return True
+    except Exception:
+        return False
 
-    threading.Thread(target=_fetch, daemon=True).start()
+
+def _prefetch_and_refresh(paths: list[str]):
+    """Fetch any missing thumbnails then rebuild the menu."""
+    missing = [Path(p).name for p in paths if Path(p).name not in _thumb_cache]
+    threads = [threading.Thread(target=_fetch_thumb, args=(n,), daemon=True) for n in missing]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=8)
+    GLib.idle_add(_refresh_menu)
 
 
-# ── Recent item widget ─────────────────────────────────────────────────────────
+# ── Menu ───────────────────────────────────────────────────────────────────────
 
 def _make_recent_item(path: str) -> Gtk.MenuItem:
-    """Build a menu item with inline thumbnail + filename + 'copy path' hint."""
+    name = Path(path).name
     item = Gtk.MenuItem()
 
     outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -88,21 +101,22 @@ def _make_recent_item(path: str) -> Gtk.MenuItem:
     outer.set_margin_start(4)
     outer.set_margin_end(8)
 
-    # Thumbnail placeholder — filled async
     img = Gtk.Image()
-    img.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
-    img.set_size_request(120, 90)
+    img.set_size_request(THUMB_W, THUMB_H)
+    if name in _thumb_cache:
+        img.set_from_pixbuf(_thumb_cache[name])
+    else:
+        img.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
     outer.pack_start(img, False, False, 0)
 
-    # Text column
     txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
     txt.set_valign(Gtk.Align.CENTER)
 
-    name = Gtk.Label(label=Path(path).name)
-    name.set_xalign(0.0)
-    name.set_max_width_chars(24)
-    name.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
-    txt.pack_start(name, False, False, 0)
+    lbl = Gtk.Label(label=name)
+    lbl.set_xalign(0.0)
+    lbl.set_max_width_chars(24)
+    lbl.set_ellipsize(3)
+    txt.pack_start(lbl, False, False, 0)
 
     hint = Gtk.Label()
     hint.set_markup('<small><span foreground="#888">click to copy path</span></small>')
@@ -111,48 +125,15 @@ def _make_recent_item(path: str) -> Gtk.MenuItem:
 
     outer.pack_start(txt, True, True, 0)
     item.add(outer)
-
-    item.connect("activate", lambda _, p=path: _on_recent_click(p))
-
-    # Kick off thumbnail download
-    url = f"{API_BASE}/files/{Path(path).name}"
-    _load_thumb_async(url, img)
-
+    item.connect("activate", lambda _, p=path: copy_to_clipboard(p))
     return item
 
-
-# ── Actions ────────────────────────────────────────────────────────────────────
-
-def _on_recent_click(path: str):
-    copy_to_clipboard(path)
-
-
-def _open_browser(_item):
-    webbrowser.open(UPLOAD_URL)
-
-
-def _take_screenshot(_item):
-    try:
-        subprocess.Popen(["gnome-screenshot", "--clipboard"])
-    except FileNotFoundError:
-        try:
-            subprocess.Popen(["scrot", "-z", "/tmp/claude_shot.png"])
-        except FileNotFoundError:
-            pass
-    webbrowser.open(UPLOAD_URL)
-
-
-def _quit(_item):
-    Gtk.main_quit()
-
-
-# ── Menu builder ───────────────────────────────────────────────────────────────
 
 def build_menu() -> Gtk.Menu:
     menu = Gtk.Menu()
 
     item_open = Gtk.MenuItem(label="Open Upload Page")
-    item_open.connect("activate", _open_browser)
+    item_open.connect("activate", lambda _: webbrowser.open(UPLOAD_URL))
     menu.append(item_open)
 
     item_shot = Gtk.MenuItem(label="Screenshot → Upload")
@@ -169,13 +150,31 @@ def build_menu() -> Gtk.Menu:
         menu.append(recent_root)
 
     menu.append(Gtk.SeparatorMenuItem())
-
     item_quit = Gtk.MenuItem(label="Quit")
-    item_quit.connect("activate", _quit)
+    item_quit.connect("activate", lambda _: Gtk.main_quit())
     menu.append(item_quit)
 
     menu.show_all()
     return menu
+
+
+def _refresh_menu():
+    if indicator:
+        indicator.set_menu(build_menu())
+    return False
+
+
+# ── Screenshot helper ──────────────────────────────────────────────────────────
+
+def _take_screenshot(_item):
+    try:
+        subprocess.Popen(["gnome-screenshot", "--clipboard"])
+    except FileNotFoundError:
+        try:
+            subprocess.Popen(["scrot", "-z", "/tmp/claude_shot.png"])
+        except FileNotFoundError:
+            pass
+    webbrowser.open(UPLOAD_URL)
 
 
 # ── Polling ────────────────────────────────────────────────────────────────────
@@ -201,35 +200,18 @@ def _poll_bg():
     if new_files and not _first_poll and HAS_NOTIFY:
         for path in new_files:
             try:
-                n = Notify.Notification.new(
-                    "Screenshot uploaded",
-                    Path(path).name,
-                    "camera-photo",
-                )
-                n.show()
+                Notify.Notification.new("Screenshot uploaded", Path(path).name, "camera-photo").show()
             except Exception:
                 pass
 
-    changed = files != recent_files
     recent_files = files
     _first_poll = False
 
-    if changed and indicator:
-        GLib.idle_add(_refresh_menu)
-
-
-def _refresh_menu():
-    if indicator:
-        indicator.set_menu(build_menu())
-    return False
+    # Pre-fetch all thumbs, then rebuild menu
+    threading.Thread(target=_prefetch_and_refresh, args=(files,), daemon=True).start()
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-
-def _initial_load():
-    poll_recent()
-    return False
-
 
 def main():
     global indicator
@@ -243,7 +225,8 @@ def main():
     indicator.set_title("Claude Photo Upload")
     indicator.set_menu(build_menu())
 
-    GLib.timeout_add(800, _initial_load)
+    # Initial load after 800ms, then every 5s
+    GLib.timeout_add(800, lambda: [poll_recent(), False][1])
     GLib.timeout_add_seconds(5, poll_recent)
 
     Gtk.main()
