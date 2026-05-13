@@ -98,6 +98,15 @@ PAGE = r"""<!DOCTYPE html>
     <h3>Recent uploads</h3>
     <div id="recent-list"></div>
   </div>
+
+  <div id="ios-install" style="display:none;margin-top:20px;text-align:center">
+    <a href="/shortcut" style="display:inline-block;background:linear-gradient(135deg,#4dc9f6,#7dd8f8);color:#0a0e14;padding:14px 24px;border-radius:14px;font-weight:600;font-size:15px;text-decoration:none">
+      📲 Install iOS Shortcut
+    </a>
+    <p style="font-size:12px;color:#7d8590;margin:8px 0 0">
+      Adds "Upload to Claude" to your Share Sheet
+    </p>
+  </div>
 </div>
 
 <script>
@@ -234,11 +243,91 @@ async function loadRecent(){
     });
   }catch(e){}
 }
+if(/iPhone|iPad|iPod/.test(navigator.userAgent))document.getElementById('ios-install').style.display='block';
 loadRecent();
 </script>
 </body>
 </html>
 """
+
+def _generate_shortcut(upload_url: str) -> bytes:
+    """Generate a binary plist iOS Shortcut that POSTs an image to upload_url."""
+    import plistlib
+
+    URL_UUID  = "4A3F2E1D-0B9C-8D7E-6F5A-4B3C2D1E0F9A"
+    DICT_UUID = "6C5D4E3F-2D1E-0F9A-8B7C-6D5E4F3A2B1C"
+
+    def token_attachment(output_name, output_uuid):
+        return {
+            "Value": {
+                "attachmentsByRange": {
+                    "{0, 1}": {
+                        "OutputName": output_name,
+                        "OutputUUID": output_uuid,
+                        "Type":       "ActionOutput",
+                    }
+                },
+                "string": "￼",
+            },
+            "WFSerializationType": "WFTextTokenString",
+        }
+
+    shortcut = {
+        "WFWorkflowActions": [
+            {
+                "WFWorkflowActionIdentifier": "is.workflow.actions.geturlcontents",
+                "WFWorkflowActionParameters": {
+                    "WFHTTPMethod":   "POST",
+                    "WFURL":          upload_url,
+                    "WFHTTPBodyType": "File",
+                    "WFHTTPBody": {
+                        "Value":               {"Type": "ExtensionInput"},
+                        "WFSerializationType": "WFTextTokenAttachment",
+                    },
+                    "UUID": URL_UUID,
+                },
+            },
+            {
+                "WFWorkflowActionIdentifier": "is.workflow.actions.getdictionaryvalue",
+                "WFWorkflowActionParameters": {
+                    "WFDictionaryKey": "path",
+                    "WFInput":         token_attachment("Contents of URL", URL_UUID),
+                    "UUID":            DICT_UUID,
+                },
+            },
+            {
+                "WFWorkflowActionIdentifier": "is.workflow.actions.setclipboard",
+                "WFWorkflowActionParameters": {
+                    "WFInput": token_attachment("Dictionary Value", DICT_UUID),
+                },
+            },
+            {
+                "WFWorkflowActionIdentifier": "is.workflow.actions.notification",
+                "WFWorkflowActionParameters": {
+                    "WFNotificationActionTitle":      "✓ Uploaded to Claude",
+                    "WFNotificationActionBody":       token_attachment("Dictionary Value", DICT_UUID),
+                    "WFNotificationActionPlaySound":  False,
+                },
+            },
+        ],
+        "WFWorkflowClientVersion": "1226.0.1",
+        "WFWorkflowHasOutputFallback": False,
+        "WFWorkflowIcon": {
+            "WFWorkflowIconGlyphNumber": 59511,
+            "WFWorkflowIconStartColor":  4292093695,
+        },
+        "WFWorkflowImportQuestions": [],
+        "WFWorkflowInputContentItemClasses": [
+            "WFImageContentItem",
+            "WFPhotoMediaContentItem",
+        ],
+        "WFWorkflowMinimumClientVersion": 900,
+        "WFWorkflowName":   "Upload to Claude",
+        "WFWorkflowTypes":  ["ShareSheet"],
+    }
+
+    return plistlib.dumps(shortcut, fmt=plistlib.FMT_BINARY)
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -273,44 +362,79 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_response(404)
                 self.end_headers()
+        elif self.path == "/shortcut":
+            data = _generate_shortcut(f"https://claude-photo.studio-colorbox.com/upload-raw")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="UploadToClaude.shortcut"')
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self):
-        if self.path != "/upload":
-            self.send_response(404)
-            self.end_headers()
-            return
-        ctype, pdict = cgi.parse_header(self.headers.get("Content-Type", ""))
-        if ctype != "multipart/form-data":
-            self.send_response(400)
-            self.end_headers()
-            return
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers["Content-Type"]},
-        )
-        f = form["file"]
+        if self.path == "/upload":
+            ctype, pdict = cgi.parse_header(self.headers.get("Content-Type", ""))
+            if ctype != "multipart/form-data":
+                self.send_response(400)
+                self.end_headers()
+                return
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers["Content-Type"]},
+            )
+            f = form["file"]
 
-        # Optional subfolder: only allow safe relative paths, no traversal
-        save_dir = SAVE_DIR
-        if "folder" in form:
-            raw = form["folder"].value.strip()
-            if raw and re.match(r'^[\w\-/]+$', raw) and ".." not in raw:
-                save_dir = SAVE_DIR / raw
+            # Optional subfolder: only allow safe relative paths, no traversal
+            save_dir = SAVE_DIR
+            if "folder" in form:
+                raw = form["folder"].value.strip()
+                if raw and re.match(r'^[\w\-/]+$', raw) and ".." not in raw:
+                    save_dir = SAVE_DIR / raw
+                    save_dir.mkdir(parents=True, exist_ok=True)
+
+            ext = os.path.splitext(f.filename)[1] or ".png"
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            out = save_dir / f"screenshot_{ts}{ext}"
+            with open(out, "wb") as fp:
+                fp.write(f.file.read())
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"path": str(out.absolute())}).encode())
+        elif self.path.startswith("/upload-raw"):
+            # Raw binary upload from iOS Shortcuts (body = image bytes, Content-Type = MIME type)
+            from urllib.parse import urlparse, parse_qs
+            query    = parse_qs(urlparse(self.path).query)
+            ext_hint = query.get("ext", [""])[0]
+            ct       = self.headers.get("Content-Type", "image/png")
+            ext_map  = {"image/png": ".png", "image/jpeg": ".jpg", "image/heic": ".heic",
+                        "image/gif": ".gif", "image/webp": ".webp"}
+            ext      = ext_hint or ext_map.get(ct.split(";")[0].strip(), ".png")
+
+            # Optional subfolder from query param
+            raw_folder = query.get("folder", [""])[0].strip()
+            save_dir   = SAVE_DIR
+            if raw_folder and re.match(r'^[\w\-/]+$', raw_folder) and ".." not in raw_folder:
+                save_dir = SAVE_DIR / raw_folder
                 save_dir.mkdir(parents=True, exist_ok=True)
 
-        ext = os.path.splitext(f.filename)[1] or ".png"
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = save_dir / f"screenshot_{ts}{ext}"
-        with open(out, "wb") as fp:
-            fp.write(f.file.read())
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps({"path": str(out.absolute())}).encode())
+            length = int(self.headers.get("Content-Length", 0))
+            data   = self.rfile.read(length)
+            ts     = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            out    = save_dir / f"screenshot_{ts}{ext}"
+            out.write_bytes(data)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"path": str(out.absolute())}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 
 if __name__ == "__main__":
