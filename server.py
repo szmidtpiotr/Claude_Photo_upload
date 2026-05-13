@@ -239,6 +239,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(data).encode())
+        elif self.path.startswith("/files/"):
+            name = os.path.basename(self.path[7:])
+            filepath = SAVE_DIR / name
+            if filepath.exists() and filepath.parent.resolve() == SAVE_DIR.resolve():
+                ext = os.path.splitext(name)[1].lower()
+                mime = {".png": "image/png", ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg", ".gif": "image/gif",
+                        ".webp": "image/webp"}.get(ext, "application/octet-stream")
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.end_headers()
+                with open(filepath, "rb") as fp:
+                    self.wfile.write(fp.read())
+            else:
+                self.send_response(404)
+                self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
