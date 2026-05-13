@@ -24,8 +24,10 @@ PAGE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Screenshot">
-<title>Screenshot Upload</title>
+<meta name="apple-mobile-web-app-title" content="Photo Upload">
+<meta name="theme-color" content="#4dc9f6">
+<link rel="manifest" href="/manifest.json">
+<title>Claude Photo Upload</title>
 <style>
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{margin:0;font:16px -apple-system,system-ui,sans-serif;background:#0a0e14;color:#e0e0e0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px}
@@ -99,7 +101,13 @@ PAGE = r"""<!DOCTYPE html>
     <div id="recent-list"></div>
   </div>
 
-  <div style="margin-top:20px">
+  <div id="android-install" style="display:none;margin-top:16px">
+    <button id="android-btn" style="width:100%;background:linear-gradient(135deg,#4dc9f6,#7dd8f8);border:none;border-radius:12px;padding:14px;color:#0a0e14;font-size:14px;font-weight:600;cursor:pointer">
+      🤖 Install on Android — adds to Share Sheet
+    </button>
+  </div>
+
+  <div style="margin-top:16px">
     <button onclick="toggleIos()" style="width:100%;background:#1f242e;border:none;border-radius:12px;padding:14px 16px;color:#e0e0e0;font-size:14px;font-weight:500;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:background .15s" id="ios-toggle">
       <span>📲 iOS Shortcut Setup</span>
       <span id="ios-arrow" style="color:#4dc9f6;font-size:18px;line-height:1">›</span>
@@ -286,6 +294,27 @@ async function loadRecent(){
   }catch(e){}
 }
 loadRecent();
+
+// PWA service worker
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');
+
+// Handle redirect back from share-target
+if(location.search.includes('shared=1')){
+  caches.open('share-results').then(c=>c.match('/last-share').then(r=>{
+    if(r)r.json().then(d=>{showResult(d.path);loadRecent();});
+  }));
+  history.replaceState(null,'','/');
+}
+
+// Android install prompt
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt',e=>{
+  e.preventDefault();deferredPrompt=e;
+  document.getElementById('android-install').style.display='block';
+});
+document.getElementById('android-btn').addEventListener('click',()=>{
+  if(deferredPrompt){deferredPrompt.prompt();deferredPrompt.waitForOutcome().then(()=>{document.getElementById('android-install').style.display='none'});}
+});
 </script>
 </body>
 </html>
@@ -412,11 +441,103 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", 'attachment; filename="UploadToClaude.shortcut"')
             self.end_headers()
             self.wfile.write(data)
+        elif self.path == "/manifest.json":
+            host   = self.headers.get("Host", "claude-photo.studio-colorbox.com")
+            scheme = "http" if host.startswith("localhost") else "https"
+            manifest = {
+                "name": "Claude Photo Upload",
+                "short_name": "Photo Upload",
+                "description": "Upload screenshots to Claude Code agent",
+                "start_url": "/",
+                "display": "standalone",
+                "background_color": "#0a0e14",
+                "theme_color": "#4dc9f6",
+                "icons": [{"src": "/icon.svg", "sizes": "any",
+                           "type": "image/svg+xml", "purpose": "any maskable"}],
+                "share_target": {
+                    "action": "/share-target",
+                    "method": "POST",
+                    "enctype": "multipart/form-data",
+                    "params": {"files": [{"name": "file", "accept": ["image/*"]}]},
+                },
+            }
+            body = json.dumps(manifest).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/manifest+json")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/icon.svg":
+            svg = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <circle cx="128" cy="128" r="124" fill="#141821" stroke="#4dc9f6" stroke-width="8"/>
+  <rect x="40" y="90" width="176" height="92" rx="18" fill="#4dc9f6"/>
+  <rect x="96" y="62" width="64" height="32" rx="8" fill="#4dc9f6"/>
+  <circle cx="128" cy="136" r="46" fill="#141821"/>
+  <circle cx="128" cy="136" r="30" fill="#7dd8f8"/>
+  <circle cx="186" cy="96" r="11" fill="#fff" stroke="#7dd8f8" stroke-width="2"/>
+</svg>"""
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.end_headers()
+            self.wfile.write(svg)
+        elif self.path == "/sw.js":
+            sw = """
+const CACHE = 'share-results';
+self.addEventListener('fetch', e => {
+  if (e.request.method === 'POST' && new URL(e.request.url).pathname === '/share-target') {
+    e.respondWith(handleShare(e.request));
+  }
+});
+async function handleShare(req) {
+  try {
+    const fd = await req.formData();
+    const file = fd.get('file');
+    if (!file) return Response.redirect('/?error=no-file', 303);
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch('/upload', {method:'POST', body:form});
+    const data = await res.json();
+    const c = await caches.open(CACHE);
+    await c.put('/last-share', new Response(JSON.stringify(data)));
+    if (self.registration.showNotification) {
+      await self.registration.showNotification('Uploaded to Claude', {
+        body: data.path.split('/').pop(),
+        icon: '/icon.svg'
+      });
+    }
+    return Response.redirect('/?shared=1', 303);
+  } catch(err) {
+    return Response.redirect('/?error=failed', 303);
+  }
+}
+""".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Service-Worker-Allowed", "/")
+            self.end_headers()
+            self.wfile.write(sw)
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self):
+        if self.path == "/share-target":
+            # Android PWA share target fallback (SW handles it normally)
+            ctype, pdict = cgi.parse_header(self.headers.get("Content-Type", ""))
+            if ctype == "multipart/form-data":
+                form = cgi.FieldStorage(
+                    fp=self.rfile, headers=self.headers,
+                    environ={"REQUEST_METHOD":"POST","CONTENT_TYPE":self.headers["Content-Type"]},
+                )
+                if "file" in form:
+                    f = form["file"]
+                    ext = os.path.splitext(f.filename)[1] or ".png"
+                    ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    out = SAVE_DIR / f"screenshot_{ts}{ext}"
+                    out.write_bytes(f.file.read())
+            self.send_response(303)
+            self.send_header("Location", "/?shared=1")
+            self.end_headers()
+            return
         if self.path == "/upload":
             ctype, pdict = cgi.parse_header(self.headers.get("Content-Type", ""))
             if ctype != "multipart/form-data":
