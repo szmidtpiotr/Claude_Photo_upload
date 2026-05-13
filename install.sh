@@ -22,6 +22,12 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     rm -f   "$APPDIR/claude-photo-tray.desktop"
     rm -f   "$AUTOSTART_DIR/claude-photo-tray.desktop"
     update-desktop-database "$APPDIR" 2>/dev/null || true
+    # Remove keyboard shortcut
+    BINDING_KEY="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/claude-photo-upload/"
+    GSBASE="org.gnome.settings-daemon.plugins.media-keys"
+    EXISTING=$(gsettings get "$GSBASE" custom-keybindings 2>/dev/null || echo "[]")
+    NEW=$(echo "$EXISTING" | sed "s|, '$BINDING_KEY'||;s|'$BINDING_KEY', ||;s|'$BINDING_KEY'||")
+    gsettings set "$GSBASE" custom-keybindings "$NEW" 2>/dev/null || true
     echo "Done."
     exit 0
 fi
@@ -100,8 +106,34 @@ cp "$APPDIR/claude-photo-tray.desktop" "$AUTOSTART_DIR/claude-photo-tray.desktop
 update-desktop-database "$APPDIR" 2>/dev/null || true
 echo "      OK  (search 'Claude' in your app launcher)"
 
-# ── 5. Launch ──────────────────────────────────────────────────────────────────
-echo "[5/5] Launching tray app..."
+# ── 5. Keyboard shortcut (Ctrl+Super+S) ───────────────────────────────────────
+echo "[5/6] Registering keyboard shortcut..."
+
+BINDING_KEY="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/claude-photo-upload/"
+GSBASE="org.gnome.settings-daemon.plugins.media-keys"
+
+# Read existing list and add our binding if not already there
+EXISTING=$(gsettings get "$GSBASE" custom-keybindings 2>/dev/null || echo "[]")
+if echo "$EXISTING" | grep -q "claude-photo-upload"; then
+    echo "      Already registered."
+else
+    if echo "$EXISTING" | grep -q "^\[\]"; then
+        gsettings set "$GSBASE" custom-keybindings "['$BINDING_KEY']" 2>/dev/null || true
+    else
+        # Append to existing list: remove trailing ] and add ours
+        NEW=$(echo "$EXISTING" | sed "s|]$|, '$BINDING_KEY']|")
+        gsettings set "$GSBASE" custom-keybindings "$NEW" 2>/dev/null || true
+    fi
+fi
+
+gsettings set "${GSBASE}.custom-keybinding:${BINDING_KEY}" name    'Claude Screenshot Upload'                   2>/dev/null || true
+gsettings set "${GSBASE}.custom-keybinding:${BINDING_KEY}" command "python3 $INSTALL_DIR/tray_app.py --screenshot" 2>/dev/null || true
+gsettings set "${GSBASE}.custom-keybinding:${BINDING_KEY}" binding '<Ctrl><Super>s'                              2>/dev/null || true
+
+echo "      OK  (Ctrl+Super+S triggers screenshot → upload)"
+
+# ── 6. Launch ──────────────────────────────────────────────────────────────────
+echo "[6/6] Launching tray app..."
 pkill -f "$INSTALL_DIR/tray_app.py" 2>/dev/null || true
 nohup python3 "$INSTALL_DIR/tray_app.py" > /tmp/claude-photo-tray.log 2>&1 &
 sleep 1
@@ -116,7 +148,8 @@ fi
 
 echo ""
 echo "=== Done ==="
-echo "  Tray icon:  camera icon top-right panel"
-echo "  App menu:   search 'Claude Photo Upload'"
-echo "  Autostart:  enabled (survives reboot)"
-echo "  Uninstall:  bash $SCRIPT_DIR/install.sh --uninstall"
+echo "  Tray icon:   camera icon, top-right panel"
+echo "  Shortcut:    Ctrl+Super+S  →  interactive screenshot → upload"
+echo "  App menu:    search 'Claude Photo Upload'"
+echo "  Autostart:   enabled (survives reboot)"
+echo "  Uninstall:   bash $SCRIPT_DIR/install.sh --uninstall"

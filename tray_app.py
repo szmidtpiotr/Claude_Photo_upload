@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 System tray icon for the Claude screenshot upload service.
-- "Screenshot → Upload": captures screen, uploads directly, shows preview popup.
-- "Recent Uploads": submenu with inline thumbnails, click to copy path.
-- Polls /recent every 5s and pre-fetches thumbnails in background.
+
+Modes:
+  python3 tray_app.py            — normal tray icon
+  python3 tray_app.py --screenshot — one-shot: capture → upload → popup → exit
+                                     (used by keyboard shortcut)
 """
 
 import os
@@ -18,8 +20,7 @@ import tempfile
 from pathlib import Path
 
 if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-    print("ERROR: No display found.")
-    print("Run this on your local desktop/laptop, not via SSH to the Claude VM.")
+    print("ERROR: No display found. Run on your desktop/laptop, not via SSH.")
     sys.exit(1)
 
 try:
@@ -38,6 +39,7 @@ UPLOAD_URL = "https://claude-photo.studio-colorbox.com/"
 API_BASE   = "https://claude-photo.studio-colorbox.com"
 APP_ID     = "claude-photo-upload"
 
+STANDALONE   = "--screenshot" in sys.argv   # keyboard-shortcut mode
 recent_files: list[str] = []
 _first_poll  = True
 indicator    = None
@@ -53,20 +55,36 @@ def copy_to_clipboard(text: str):
     cb.store()
 
 
-# ── Screenshot capture ─────────────────────────────────────────────────────────
+# ── Interactive screenshot capture ─────────────────────────────────────────────
 
 def _capture_screenshot() -> str | None:
-    """Save a full-screen screenshot to a temp file. Returns path or None."""
-    tmp = tempfile.mktemp(suffix=".png")
+    """Interactive area-select screenshot → temp file. Returns path or None."""
+    tmp  = tempfile.mktemp(suffix=".png")
     wayland = bool(os.environ.get("WAYLAND_DISPLAY"))
-    candidates = (
-        [["grim", tmp], ["gnome-screenshot", "-f", tmp]]
-        if wayland else
-        [["gnome-screenshot", "-f", tmp], ["scrot", tmp], ["import", "-window", "root", tmp]]
-    )
+
+    if wayland:
+        # grim + slurp (native Wayland area select)
+        try:
+            sel = subprocess.run(["slurp"], capture_output=True, text=True, timeout=30)
+            if sel.returncode == 0 and sel.stdout.strip():
+                r = subprocess.run(["grim", "-g", sel.stdout.strip(), tmp], timeout=15)
+                if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+                    return tmp
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        # fall through to gnome-screenshot portal
+        candidates = [["gnome-screenshot", "-a", "-f", tmp]]
+    else:
+        candidates = [
+            ["gnome-screenshot", "-a", "-f", tmp],  # GNOME area select
+            ["scrot", "-s", tmp],                    # scrot area select
+            ["import", tmp],                         # ImageMagick interactive
+        ]
+
     for cmd in candidates:
         try:
-            r = subprocess.run(cmd, timeout=15, capture_output=True)
+            # No capture_output — let the tool show its selection UI
+            r = subprocess.run(cmd, timeout=60)
             if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
                 return tmp
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -74,13 +92,13 @@ def _capture_screenshot() -> str | None:
     return None
 
 
-# ── Direct HTTP upload ─────────────────────────────────────────────────────────
+# ── HTTP upload ────────────────────────────────────────────────────────────────
 
 def _upload_file(filepath: str) -> str:
     """POST file as multipart/form-data. Returns the server-saved absolute path."""
     content_type = mimetypes.guess_type(filepath)[0] or "image/png"
     filename     = os.path.basename(filepath)
-    boundary     = b"----PythonFormBoundary" + os.urandom(8).hex().encode()
+    boundary     = b"----PythonBoundary" + os.urandom(8).hex().encode()
 
     with open(filepath, "rb") as f:
         file_data = f.read()
@@ -88,8 +106,7 @@ def _upload_file(filepath: str) -> str:
     body = (
         b"--" + boundary + b"\r\n"
         b'Content-Disposition: form-data; name="file"; filename="' + filename.encode() + b'"\r\n'
-        b"Content-Type: " + content_type.encode() + b"\r\n"
-        b"\r\n"
+        b"Content-Type: " + content_type.encode() + b"\r\n\r\n"
         + file_data
         + b"\r\n--" + boundary + b"--\r\n"
     )
@@ -104,7 +121,7 @@ def _upload_file(filepath: str) -> str:
         return json.loads(resp.read())["path"]
 
 
-# ── Upload preview popup ───────────────────────────────────────────────────────
+# ── Upload result popup ────────────────────────────────────────────────────────
 
 def _show_upload_popup(path: str, local_image: str):
     win = Gtk.Window()
@@ -120,20 +137,18 @@ def _show_upload_popup(path: str, local_image: str):
         win.move(g.x + g.width - 300, g.y + g.height - 340)
 
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-    box.set_margin_top(12)
-    box.set_margin_bottom(12)
-    box.set_margin_start(12)
-    box.set_margin_end(12)
+    for m in ("top", "bottom", "start", "end"):
+        getattr(box, f"set_margin_{m}")(12)
 
     try:
-        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(local_image, 256, 192, True)
-        box.pack_start(Gtk.Image.new_from_pixbuf(pixbuf), False, False, 0)
+        px = GdkPixbuf.Pixbuf.new_from_file_at_scale(local_image, 256, 192, True)
+        box.pack_start(Gtk.Image.new_from_pixbuf(px), False, False, 0)
     except Exception:
         pass
 
-    status = Gtk.Label()
-    status.set_markup("<b>✓ Uploaded — path copied!</b>")
-    box.pack_start(status, False, False, 0)
+    lbl = Gtk.Label()
+    lbl.set_markup("<b>✓ Uploaded — path copied!</b>")
+    box.pack_start(lbl, False, False, 0)
 
     name_lbl = Gtk.Label(label=Path(path).name)
     name_lbl.set_max_width_chars(32)
@@ -144,50 +159,59 @@ def _show_upload_popup(path: str, local_image: str):
     btn.connect("clicked", lambda _: copy_to_clipboard(path))
     box.pack_start(btn, False, False, 0)
 
+    def _close():
+        win.destroy()
+        if STANDALONE:
+            Gtk.main_quit()
+        return False
+
+    win.connect("destroy", lambda _: Gtk.main_quit() if STANDALONE else None)
     win.add(box)
     win.show_all()
     copy_to_clipboard(path)
-    GLib.timeout_add_seconds(6, lambda: win.destroy() or False)
+    GLib.timeout_add_seconds(6, _close)
     return False  # for GLib.idle_add
 
 
-def _show_error_popup(msg: str):
+def _show_error(msg: str):
     dlg = Gtk.MessageDialog(
         message_type=Gtk.MessageType.ERROR,
         buttons=Gtk.ButtonsType.CLOSE,
-        text="Screenshot upload failed",
+        text="Upload failed",
     )
     dlg.format_secondary_text(msg)
     dlg.run()
     dlg.destroy()
+    if STANDALONE:
+        Gtk.main_quit()
     return False
 
 
-# ── Screenshot → upload action ─────────────────────────────────────────────────
+# ── Screenshot → upload background worker ─────────────────────────────────────
 
-def _do_screenshot_upload(_item):
+def _do_screenshot_upload(_item=None):
     threading.Thread(target=_screenshot_upload_bg, daemon=True).start()
 
 
 def _screenshot_upload_bg():
     tmp = _capture_screenshot()
     if tmp is None:
-        GLib.idle_add(_show_error_popup,
-                      "No screenshot tool found.\nInstall gnome-screenshot or scrot.")
+        GLib.idle_add(_show_error, "No screenshot tool found.\nInstall gnome-screenshot or scrot.")
         return
     try:
         path = _upload_file(tmp)
         name = Path(path).name
-        # Cache thumbnail from the local file (fast, no download needed)
         try:
-            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(tmp, THUMB_W, THUMB_H, True)
-            _thumb_cache[name] = pixbuf
+            _thumb_cache[name] = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                tmp, THUMB_W, THUMB_H, True
+            )
         except Exception:
             pass
         GLib.idle_add(_show_upload_popup, path, tmp)
-        GLib.idle_add(_refresh_menu)
+        if not STANDALONE:
+            GLib.idle_add(_refresh_menu)
     except Exception as e:
-        GLib.idle_add(_show_error_popup, str(e))
+        GLib.idle_add(_show_error, str(e))
 
 
 # ── Thumbnail cache ────────────────────────────────────────────────────────────
@@ -195,13 +219,13 @@ def _screenshot_upload_bg():
 def _fetch_thumb(name: str):
     if name in _thumb_cache:
         return
-    url = f"{API_BASE}/files/{name}"
     try:
         suffix = Path(name).suffix or ".png"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-            urllib.request.urlretrieve(url, f.name)
-            local = f.name
-        _thumb_cache[name] = GdkPixbuf.Pixbuf.new_from_file_at_scale(local, THUMB_W, THUMB_H, True)
+            urllib.request.urlretrieve(f"{API_BASE}/files/{name}", f.name)
+            _thumb_cache[name] = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                f.name, THUMB_W, THUMB_H, True
+            )
     except Exception:
         pass
 
@@ -218,21 +242,19 @@ def _prefetch_and_refresh(paths: list[str]):
     GLib.idle_add(_refresh_menu)
 
 
-# ── Menu ───────────────────────────────────────────────────────────────────────
+# ── Tray menu ──────────────────────────────────────────────────────────────────
 
 def _make_recent_item(path: str) -> Gtk.MenuItem:
     name = Path(path).name
     item = Gtk.MenuItem()
-
     outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-    outer.set_margin_top(4); outer.set_margin_bottom(4)
-    outer.set_margin_start(4); outer.set_margin_end(8)
+    for m in ("top", "bottom", "start"):
+        getattr(outer, f"set_margin_{m}")(4)
+    outer.set_margin_end(8)
 
     img = Gtk.Image()
     img.set_size_request(THUMB_W, THUMB_H)
-    if name in _thumb_cache:
-        img.set_from_pixbuf(_thumb_cache[name])
-    else:
+    img.set_from_pixbuf(_thumb_cache[name]) if name in _thumb_cache else \
         img.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
     outer.pack_start(img, False, False, 0)
 
@@ -259,18 +281,18 @@ def build_menu() -> Gtk.Menu:
     item_open.connect("activate", lambda _: webbrowser.open(UPLOAD_URL))
     menu.append(item_open)
 
-    item_shot = Gtk.MenuItem(label="Screenshot → Upload")
+    item_shot = Gtk.MenuItem(label="Screenshot → Upload  (Ctrl+Super+S)")
     item_shot.connect("activate", _do_screenshot_upload)
     menu.append(item_shot)
 
     if recent_files:
         menu.append(Gtk.SeparatorMenuItem())
-        recent_root = Gtk.MenuItem(label="Recent Uploads")
-        sub = Gtk.Menu()
-        for path in recent_files[:5]:
-            sub.append(_make_recent_item(path))
-        recent_root.set_submenu(sub)
-        menu.append(recent_root)
+        root = Gtk.MenuItem(label="Recent Uploads")
+        sub  = Gtk.Menu()
+        for p in recent_files[:5]:
+            sub.append(_make_recent_item(p))
+        root.set_submenu(sub)
+        menu.append(root)
 
     menu.append(Gtk.SeparatorMenuItem())
     item_quit = Gtk.MenuItem(label="Quit")
@@ -304,17 +326,15 @@ def poll_recent() -> bool:
 
 def _poll_bg():
     global recent_files, _first_poll
-    files = _fetch_recent()
-    recent_files = files
-    _first_poll = False
-    threading.Thread(target=_prefetch_and_refresh, args=(files,), daemon=True).start()
+    recent_files = _fetch_recent()
+    _first_poll  = False
+    threading.Thread(target=_prefetch_and_refresh, args=(recent_files,), daemon=True).start()
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Entry points ───────────────────────────────────────────────────────────────
 
-def main():
+def main_tray():
     global indicator
-
     indicator = AppIndicator3.Indicator.new(
         APP_ID, "camera-photo",
         AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
@@ -322,12 +342,19 @@ def main():
     indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
     indicator.set_title("Claude Photo Upload")
     indicator.set_menu(build_menu())
-
     GLib.timeout_add(800, lambda: [poll_recent(), False][1])
     GLib.timeout_add_seconds(5, poll_recent)
-
     Gtk.main()
 
 
+def main_screenshot():
+    """One-shot mode: capture → upload → popup → exit. Used by keyboard shortcut."""
+    _do_screenshot_upload()
+    Gtk.main()   # runs until popup closes (6s) or user closes it
+
+
 if __name__ == "__main__":
-    main()
+    if STANDALONE:
+        main_screenshot()
+    else:
+        main_tray()
