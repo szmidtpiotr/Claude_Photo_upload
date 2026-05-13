@@ -363,7 +363,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
         elif self.path == "/shortcut":
-            data = _generate_shortcut(f"https://claude-photo.studio-colorbox.com/upload-raw")
+            host   = self.headers.get("Host", "claude-photo.studio-colorbox.com")
+            scheme = "http" if host.startswith("localhost") else "https"
+            data   = _generate_shortcut(f"{scheme}://{host}/upload-raw")
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Disposition", 'attachment; filename="UploadToClaude.shortcut"')
