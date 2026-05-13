@@ -99,13 +99,35 @@ PAGE = r"""<!DOCTYPE html>
     <div id="recent-list"></div>
   </div>
 
-  <div id="ios-install" style="display:none;margin-top:20px;text-align:center">
-    <a href="/shortcut" style="display:inline-block;background:linear-gradient(135deg,#4dc9f6,#7dd8f8);color:#0a0e14;padding:14px 24px;border-radius:14px;font-weight:600;font-size:15px;text-decoration:none">
-      📲 Install iOS Shortcut
-    </a>
-    <p style="font-size:12px;color:#7d8590;margin:8px 0 0">
-      Adds "Upload to Claude" to your Share Sheet
-    </p>
+  <div id="ios-install" style="display:none;margin-top:20px">
+    <div style="background:#1f242e;border-radius:16px;padding:20px">
+      <div style="font-weight:600;font-size:15px;margin-bottom:4px">📲 iOS Shortcut Setup</div>
+      <div style="font-size:12px;color:#7d8590;margin-bottom:16px">Create once — appears in every Share Sheet</div>
+
+      <div style="font-size:13px;color:#b0b0b0;line-height:1.9">
+        <b style="color:#e0e0e0">1.</b> Open <b style="color:#e0e0e0">Shortcuts</b> app → tap <b style="color:#4dc9f6">+</b><br>
+        <b style="color:#e0e0e0">2.</b> Add Action → search <b style="color:#4dc9f6">Get Contents of URL</b><br>
+        <b style="color:#e0e0e0">3.</b> Set URL → tap below to copy it:<br>
+      </div>
+
+      <div id="sc-url" style="background:#0a0e14;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;color:#4dc9f6;word-break:break-all;cursor:pointer" onclick="copyUrl()">https://claude-photo.studio-colorbox.com/upload-raw</div>
+      <div id="sc-copied" style="font-size:11px;color:#4caf50;display:none;margin-bottom:6px">✓ Copied!</div>
+
+      <div style="font-size:13px;color:#b0b0b0;line-height:1.9">
+        <b style="color:#e0e0e0">4.</b> Method → <b style="color:#4dc9f6">POST</b>, Request Body → <b style="color:#4dc9f6">File</b><br>
+        <b style="color:#e0e0e0">5.</b> Tap File field → choose <b style="color:#4dc9f6">Shortcut Input</b><br>
+        <b style="color:#e0e0e0">6.</b> Add Action → <b style="color:#4dc9f6">Get Dictionary Value</b>, key = <b style="color:#4dc9f6">path</b><br>
+        <b style="color:#e0e0e0">7.</b> Add Action → <b style="color:#4dc9f6">Copy to Clipboard</b><br>
+        <b style="color:#e0e0e0">8.</b> Add Action → <b style="color:#4dc9f6">Show Notification</b><br>
+        <b style="color:#e0e0e0">9.</b> Name it <b style="color:#4dc9f6">Upload to Claude</b><br>
+        <b style="color:#e0e0e0">10.</b> Tap <b style="color:#4dc9f6">ⓘ</b> → enable <b style="color:#4dc9f6">Show in Share Sheet</b>
+      </div>
+
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid #2a3140;font-size:12px;color:#7d8590">
+        <b style="color:#b0b0b0">Tip — Auto-upload on screenshot:</b><br>
+        Automation tab → + → Personal Automation → Screenshot → same actions above → disable "Ask Before Running"
+      </div>
+    </div>
   </div>
 </div>
 
@@ -225,6 +247,13 @@ copyBtn.addEventListener('click',async()=>{
   }
 });
 
+function copyUrl(){
+  const url=document.getElementById('sc-url').textContent;
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(url).catch(()=>copyToClipboardFallback(url))}else{copyToClipboardFallback(url)}
+  const el=document.getElementById('sc-copied');el.style.display='block';setTimeout(()=>el.style.display='none',2000);
+}
+if(/iPhone|iPad|iPod/.test(navigator.userAgent))document.getElementById('ios-install').style.display='block';
+
 async function loadRecent(){
   try{
     const r=await fetch('/recent');const d=await r.json();
@@ -243,7 +272,6 @@ async function loadRecent(){
     });
   }catch(e){}
 }
-if(/iPhone|iPad|iPod/.test(navigator.userAgent))document.getElementById('ios-install').style.display='block';
 loadRecent();
 </script>
 </body>
