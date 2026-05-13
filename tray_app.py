@@ -2,8 +2,7 @@
 """
 System tray icon for the Claude screenshot upload service.
 Uses AppIndicator3 (Ubuntu/GNOME native) with GTK3 menu.
-- Polls /recent every 5s; shows a preview popup when a new upload is detected.
-- "Recent Uploads" submenu lets you re-copy any of the last 5 paths + preview.
+Recent uploads show inline thumbnail previews inside the dropdown.
 """
 
 import os
@@ -33,6 +32,15 @@ except (ImportError, ValueError) as e:
     print("Run: sudo apt install gir1.2-appindicator3-0.1 python3-gi gir1.2-gtk-3.0")
     sys.exit(1)
 
+# Optional: system notification on new upload
+try:
+    gi.require_version("Notify", "0.7")
+    from gi.repository import Notify
+    Notify.init("Claude Photo Upload")
+    HAS_NOTIFY = True
+except Exception:
+    HAS_NOTIFY = False
+
 UPLOAD_URL = "https://claude-photo.studio-colorbox.com/"
 API_BASE   = "https://claude-photo.studio-colorbox.com"
 APP_ID     = "claude-photo-upload"
@@ -50,115 +58,73 @@ def copy_to_clipboard(text: str):
     cb.store()
 
 
-# ── Preview popup ──────────────────────────────────────────────────────────────
+# ── Thumbnail loader ───────────────────────────────────────────────────────────
 
-def show_preview_popup(path: str, image_url: str):
-    """Fetch thumbnail in a thread, open GTK popup on the main thread."""
+def _load_thumb_async(url: str, img_widget: Gtk.Image, size: tuple[int, int] = (120, 90)):
+    """Download image in background, set pixbuf on img_widget when ready."""
     def _fetch():
         try:
-            suffix = Path(path).suffix or ".png"
-            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-            urllib.request.urlretrieve(image_url, tmp.name)
-            local = tmp.name
+            suffix = Path(url).suffix or ".png"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                urllib.request.urlretrieve(url, f.name)
+                local = f.name
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(local, size[0], size[1], True)
+            GLib.idle_add(img_widget.set_from_pixbuf, pixbuf)
         except Exception:
-            local = None
-        GLib.idle_add(_open_popup, path, local)
+            pass
 
     threading.Thread(target=_fetch, daemon=True).start()
 
 
-def _open_popup(path: str, image_file: str | None):
-    win = Gtk.Window()
-    win.set_title("Claude Photo Upload")
-    win.set_default_size(260, 50)
-    win.set_keep_above(True)
-    win.set_resizable(False)
+# ── Recent item widget ─────────────────────────────────────────────────────────
 
-    # Position: bottom-right of primary monitor
-    display = Gdk.Display.get_default()
-    monitor = display.get_primary_monitor() if display else None
-    if monitor:
-        g = monitor.get_geometry()
-        win.move(g.x + g.width - 280, g.y + g.height - 330)
+def _make_recent_item(path: str) -> Gtk.MenuItem:
+    """Build a menu item with inline thumbnail + filename + 'copy path' hint."""
+    item = Gtk.MenuItem()
 
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-    box.set_margin_top(10)
-    box.set_margin_bottom(10)
-    box.set_margin_start(10)
-    box.set_margin_end(10)
+    outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+    outer.set_margin_top(4)
+    outer.set_margin_bottom(4)
+    outer.set_margin_start(4)
+    outer.set_margin_end(8)
 
-    if image_file:
-        try:
-            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(image_file, 240, 180, True)
-            box.pack_start(Gtk.Image.new_from_pixbuf(pixbuf), False, False, 0)
-        except Exception:
-            pass
+    # Thumbnail placeholder — filled async
+    img = Gtk.Image()
+    img.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
+    img.set_size_request(120, 90)
+    outer.pack_start(img, False, False, 0)
 
-    name_label = Gtk.Label(label=Path(path).name)
-    name_label.set_max_width_chars(32)
-    name_label.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
-    box.pack_start(name_label, False, False, 0)
+    # Text column
+    txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    txt.set_valign(Gtk.Align.CENTER)
 
-    copied_label = Gtk.Label(label="✓ Path copied to clipboard")
-    box.pack_start(copied_label, False, False, 0)
+    name = Gtk.Label(label=Path(path).name)
+    name.set_xalign(0.0)
+    name.set_max_width_chars(24)
+    name.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
+    txt.pack_start(name, False, False, 0)
 
-    copy_btn = Gtk.Button(label="Copy Path Again")
-    copy_btn.connect("clicked", lambda _: copy_to_clipboard(path))
-    box.pack_start(copy_btn, False, False, 0)
+    hint = Gtk.Label()
+    hint.set_markup('<small><span foreground="#888">click to copy path</span></small>')
+    hint.set_xalign(0.0)
+    txt.pack_start(hint, False, False, 0)
 
-    win.add(box)
-    win.show_all()
+    outer.pack_start(txt, True, True, 0)
+    item.add(outer)
 
-    copy_to_clipboard(path)
-    GLib.timeout_add_seconds(6, lambda: win.destroy() or False)
+    item.connect("activate", lambda _, p=path: _on_recent_click(p))
 
-    return False  # consumed by GLib.idle_add
+    # Kick off thumbnail download
+    url = f"{API_BASE}/files/{Path(path).name}"
+    _load_thumb_async(url, img)
+
+    return item
 
 
-# ── Polling ────────────────────────────────────────────────────────────────────
-
-def _fetch_recent() -> list[str]:
-    try:
-        with urllib.request.urlopen(f"{API_BASE}/recent", timeout=5) as r:
-            return json.loads(r.read())["files"]
-    except Exception:
-        return []
-
-
-def poll_recent() -> bool:
-    threading.Thread(target=_poll_bg, daemon=True).start()
-    return True  # keep GLib timer alive
-
-
-def _poll_bg():
-    global recent_files, _first_poll
-    files = _fetch_recent()
-    new_files = [f for f in files if f not in recent_files]
-
-    if new_files and not _first_poll:
-        for path in new_files:
-            url = f"{API_BASE}/files/{Path(path).name}"
-            show_preview_popup(path, url)
-
-    changed = files != recent_files
-    recent_files = files
-    _first_poll = False
-
-    if changed and indicator:
-        GLib.idle_add(_refresh_menu)
-
-
-def _refresh_menu():
-    if indicator:
-        indicator.set_menu(build_menu())
-    return False
-
-
-# ── Menu ───────────────────────────────────────────────────────────────────────
+# ── Actions ────────────────────────────────────────────────────────────────────
 
 def _on_recent_click(path: str):
-    url = f"{API_BASE}/files/{Path(path).name}"
-    show_preview_popup(path, url)
+    copy_to_clipboard(path)
 
 
 def _open_browser(_item):
@@ -180,6 +146,8 @@ def _quit(_item):
     Gtk.main_quit()
 
 
+# ── Menu builder ───────────────────────────────────────────────────────────────
+
 def build_menu() -> Gtk.Menu:
     menu = Gtk.Menu()
 
@@ -196,9 +164,7 @@ def build_menu() -> Gtk.Menu:
         recent_root = Gtk.MenuItem(label="Recent Uploads")
         sub = Gtk.Menu()
         for path in recent_files[:5]:
-            item = Gtk.MenuItem(label=Path(path).name)
-            item.connect("activate", lambda _, p=path: _on_recent_click(p))
-            sub.append(item)
+            sub.append(_make_recent_item(path))
         recent_root.set_submenu(sub)
         menu.append(recent_root)
 
@@ -212,11 +178,57 @@ def build_menu() -> Gtk.Menu:
     return menu
 
 
+# ── Polling ────────────────────────────────────────────────────────────────────
+
+def _fetch_recent() -> list[str]:
+    try:
+        with urllib.request.urlopen(f"{API_BASE}/recent", timeout=5) as r:
+            return json.loads(r.read())["files"]
+    except Exception:
+        return []
+
+
+def poll_recent() -> bool:
+    threading.Thread(target=_poll_bg, daemon=True).start()
+    return True
+
+
+def _poll_bg():
+    global recent_files, _first_poll
+    files = _fetch_recent()
+    new_files = [f for f in files if f not in recent_files]
+
+    if new_files and not _first_poll and HAS_NOTIFY:
+        for path in new_files:
+            try:
+                n = Notify.Notification.new(
+                    "Screenshot uploaded",
+                    Path(path).name,
+                    "camera-photo",
+                )
+                n.show()
+            except Exception:
+                pass
+
+    changed = files != recent_files
+    recent_files = files
+    _first_poll = False
+
+    if changed and indicator:
+        GLib.idle_add(_refresh_menu)
+
+
+def _refresh_menu():
+    if indicator:
+        indicator.set_menu(build_menu())
+    return False
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def _initial_load():
     poll_recent()
-    return False  # one-shot
+    return False
 
 
 def main():
@@ -231,8 +243,8 @@ def main():
     indicator.set_title("Claude Photo Upload")
     indicator.set_menu(build_menu())
 
-    GLib.timeout_add(800, _initial_load)          # load recent once on startup
-    GLib.timeout_add_seconds(5, poll_recent)      # then poll every 5s
+    GLib.timeout_add(800, _initial_load)
+    GLib.timeout_add_seconds(5, poll_recent)
 
     Gtk.main()
 
