@@ -367,7 +367,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             scheme = "http" if host.startswith("localhost") else "https"
             data   = _generate_shortcut(f"{scheme}://{host}/upload-raw")
             self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Type", "application/x-apple-shortcut")
             self.send_header("Content-Disposition", 'attachment; filename="UploadToClaude.shortcut"')
             self.end_headers()
             self.wfile.write(data)
