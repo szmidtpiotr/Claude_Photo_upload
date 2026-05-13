@@ -8,6 +8,7 @@ import http.server
 import socketserver
 import cgi
 import os
+import re
 import datetime
 import json
 import html
@@ -292,9 +293,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers["Content-Type"]},
         )
         f = form["file"]
+
+        # Optional subfolder: only allow safe relative paths, no traversal
+        save_dir = SAVE_DIR
+        if "folder" in form:
+            raw = form["folder"].value.strip()
+            if raw and re.match(r'^[\w\-/]+$', raw) and ".." not in raw:
+                save_dir = SAVE_DIR / raw
+                save_dir.mkdir(parents=True, exist_ok=True)
+
         ext = os.path.splitext(f.filename)[1] or ".png"
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = SAVE_DIR / f"screenshot_{ts}{ext}"
+        out = save_dir / f"screenshot_{ts}{ext}"
         with open(out, "wb") as fp:
             fp.write(f.file.read())
         self.send_response(200)
